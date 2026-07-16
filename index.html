@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Moje střílečka</title>
+  <style>
+    /* Základní styl: hra vyplní celé okno, žádné posuvníky */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: system-ui, sans-serif; }
+    canvas { display: block; }
+
+    /* Zaměřovací křížek uprostřed obrazovky */
+    #crosshair {
+      position: fixed;
+      top: 50%; left: 50%;
+      width: 20px; height: 20px;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 10;
+    }
+    #crosshair::before, #crosshair::after {
+      content: "";
+      position: absolute;
+      background: rgba(255,255,255,0.85);
+    }
+    #crosshair::before { left: 50%; top: 0; width: 2px; height: 100%; transform: translateX(-50%); }
+    #crosshair::after  { top: 50%; left: 0; height: 2px; width: 100%; transform: translateY(-50%); }
+
+    /* Úvodní překryv – klikni pro spuštění (kvůli zamčení myši do hry) */
+    #overlay {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 12px;
+      background: rgba(0,0,0,0.75);
+      color: #fff; text-align: center;
+      z-index: 20; cursor: pointer;
+    }
+    #overlay h1 { font-size: 28px; }
+    #overlay p  { font-size: 16px; opacity: 0.85; }
+    #overlay .key { display: inline-block; padding: 2px 8px; border: 1px solid #888; border-radius: 4px; margin: 0 2px; }
+    #overlay.hidden { display: none; }
+
+    /* HUD – informace v rohu (počet zabitých nepřátel) */
+    #hud {
+      position: fixed;
+      top: 16px; left: 16px;
+      z-index: 10;
+      color: #fff;
+      font-size: 20px;
+      font-weight: bold;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+      pointer-events: none;
+    }
+  </style>
+
+  <!-- Import map: říká prohlížeči, kde najít knihovnu Three.js (načte se z internetu) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="crosshair"></div>
+  <div id="hud">Zabito: 0</div>
+
+  <div id="overlay">
+    <h1>🔫 Moje střílečka</h1>
+    <p>Klikni sem pro start</p>
+    <p>
+      Pohyb: <span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span>
+      &nbsp;•&nbsp; Rozhlížení: <span class="key">myš</span>
+      &nbsp;•&nbsp; Konec: <span class="key">Esc</span>
+    </p>
+  </div>
+
+  <!-- Hlavní kód hry -->
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
