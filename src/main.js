@@ -1,6 +1,7 @@
 // ============================================================
-//  Moje střílečka – hlavní soubor hry (Milník 0 + 1)
-//  Zatím: 3D místnost, chůze (WASD) a rozhlížení myší.
+//  Moje střílečka – hlavní soubor hry
+//  Umí: mřížkovou mapu s texturami, chůzi (WASD) a rozhlížení myší,
+//  střílení, nepřátele se životy, HUD (životy + zabití), výhru/prohru.
 //  Vše je bohatě okomentované, ať víš, co která část dělá.
 // ============================================================
 
@@ -12,8 +13,8 @@ import * as THREE from 'three';
 
 // Scéna = 3D svět, do kterého vkládáme objekty
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87b8e8); // světle modrá "obloha"
-scene.fog = new THREE.Fog(0x87b8e8, 10, 60);  // mlha do dálky, ať to má hloubku
+scene.background = new THREE.Color(0x14141c); // tmavé pozadí (uvnitř budovy)
+scene.fog = new THREE.Fog(0x14141c, 8, 45);   // vzdálené chodby se ztrácejí ve tmě
 
 // Bezpečné rozměry okna (kdyby prohlížeč hlásil 0, použijeme rozumnou náhradu),
 // jinak by poměr stran vyšel neplatně a rozbil by se výpočet výstřelu.
@@ -41,7 +42,7 @@ scene.add(camera);
 // ------------------------------------------------------------
 
 // Rozptýlené světlo (jemně nasvítí vše, aby nebyly úplné černé stíny)
-scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+scene.add(new THREE.AmbientLight(0xffffff, 0.85));
 
 // Směrové světlo = jako slunce, vrhá stíny
 const sun = new THREE.DirectionalLight(0xffffff, 1.0);
@@ -50,67 +51,133 @@ sun.castShadow = true;
 scene.add(sun);
 
 // ------------------------------------------------------------
-// 3) MÍSTNOST: podlaha, stěny a pár sloupů (překážek)
+// 3) MAPA: level poskládaný z mřížky.
+//    #=zeď, .=podlaha (volno), P=start hráče, E=nepřítel.
+//    Mapu si klidně uprav – jen ať mají všechny řádky STEJNOU délku
+//    a celý okraj je ze stěn (#), aby se nedalo vypadnout ven.
 // ------------------------------------------------------------
 
-const ROOM = 20;       // rozměr místnosti (20 x 20 metrů)
-const WALL_H = 4;      // výška stěn
-const WALL_T = 1;      // tloušťka stěn
+const CELL = 4;    // velikost jedné buňky mřížky (metry)
+const WALL_H = 4;  // výška stěn
 
-// Podlaha
+const MAP = [
+  "################",
+  "#P....#........#",
+  "#.....#........#",
+  "#.....#...E....#",
+  "#.....#........#",
+  "#.....####.#####",
+  "#.........#....#",
+  "#....E....#.E..#",
+  "#.........#....#",
+  "####.######....#",
+  "#....#....#....#",
+  "#..E.#.E..#..E.#",
+  "#....#....#....#",
+  "#....#....#....#",
+  "################",
+];
+
+const ROWS = MAP.length;
+const COLS = MAP[0].length;
+
+// Převod pozice v mřížce na souřadnice ve světě (mapu vycentrujeme na střed)
+function cellToWorldX(col) { return (col - (COLS - 1) / 2) * CELL; }
+function cellToWorldZ(row) { return (row - (ROWS - 1) / 2) * CELL; }
+
+// --- Textury nakreslené přímo v kódu (žádné stahování obrázků) ---
+
+// Cihlová zeď
+function makeBrickTexture() {
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = '#5a5148';                 // malta (spáry mezi cihlami)
+  g.fillRect(0, 0, 128, 128);
+  g.fillStyle = '#8a4b3a';                 // barva cihly
+  const bw = 60, bh = 28, gap = 4;
+  let row = 0;
+  for (let y = 0; y < 128; y += bh + gap, row++) {
+    const offset = (row % 2) ? -(bw + gap) / 2 : 0; // každá druhá řada posunutá
+    for (let x = offset; x < 128; x += bw + gap) {
+      g.fillRect(x, y, bw, bh);
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(2, 2);
+  return tex;
+}
+
+// Dlaždicová podlaha
+function makeFloorTexture() {
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = '#25282e';                 // tmavá spára
+  g.fillRect(0, 0, 128, 128);
+  g.fillStyle = '#40454d';                 // dlaždice
+  g.fillRect(4, 4, 120, 120);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(COLS, ROWS);              // jedna dlaždice na každou buňku
+  return tex;
+}
+
+const brickTexture = makeBrickTexture();
+const floorTexture = makeFloorTexture();
+
+// Podlaha (jedna velká deska přes celou mapu)
 const floor = new THREE.Mesh(
-  new THREE.PlaneGeometry(ROOM, ROOM),
-  new THREE.MeshStandardMaterial({ color: 0x555555 })
+  new THREE.PlaneGeometry(COLS * CELL, ROWS * CELL),
+  new THREE.MeshStandardMaterial({ map: floorTexture })
 );
-floor.rotation.x = -Math.PI / 2; // otočíme naležato
+floor.rotation.x = -Math.PI / 2;
 floor.receiveShadow = true;
 scene.add(floor);
 
-// Sem si ukládáme všechny objekty, do kterých se dá střílet (pro "paprsek" výstřelu)
-const shootables = [];
-shootables.push(floor);
-
-// Strop (jen barevný, ať nekoukáme do modré oblohy uvnitř)
+// Strop
 const ceiling = new THREE.Mesh(
-  new THREE.PlaneGeometry(ROOM, ROOM),
-  new THREE.MeshStandardMaterial({ color: 0x333333 })
+  new THREE.PlaneGeometry(COLS * CELL, ROWS * CELL),
+  new THREE.MeshStandardMaterial({ color: 0x202028 })
 );
 ceiling.rotation.x = Math.PI / 2;
 ceiling.position.y = WALL_H;
 scene.add(ceiling);
 
-// Sem si budeme ukládat všechny objekty, do kterých se nesmí projít (pro kolize)
+// Objekty pro střelbu (paprsek) a pro kolize (neprůchodnost)
+const shootables = [floor];
 const obstacles = [];
 
-// Pomocná funkce: vytvoří kvádr (stěnu/sloup) a zaeviduje ho do kolizí
-function makeBox(w, h, d, x, y, z, color) {
-  const box = new THREE.Mesh(
-    new THREE.BoxGeometry(w, h, d),
-    new THREE.MeshStandardMaterial({ color })
-  );
-  box.position.set(x, y, z);
+// Vytvoří jednu zeď (buňku mřížky) na daných světových souřadnicích
+const wallMaterial = new THREE.MeshStandardMaterial({ map: brickTexture });
+function makeWall(x, z) {
+  const box = new THREE.Mesh(new THREE.BoxGeometry(CELL, WALL_H, CELL), wallMaterial);
+  box.position.set(x, WALL_H / 2, z);
   box.castShadow = true;
   box.receiveShadow = true;
   scene.add(box);
-  // Uložíme si jeho "obálku" (bounding box) pro kolize
   box.updateMatrixWorld(true);
-  const bbox = new THREE.Box3().setFromObject(box);
-  obstacles.push(bbox);
-  shootables.push(box); // do stěn i sloupů se dá střílet
-  return box;
+  obstacles.push(new THREE.Box3().setFromObject(box));
+  shootables.push(box);
 }
 
-const half = ROOM / 2;
-// Čtyři obvodové stěny
-makeBox(ROOM, WALL_H, WALL_T, 0, WALL_H / 2, -half, 0x8a8a9a); // severní
-makeBox(ROOM, WALL_H, WALL_T, 0, WALL_H / 2, half, 0x8a8a9a);  // jižní
-makeBox(WALL_T, WALL_H, ROOM, -half, WALL_H / 2, 0, 0x9a8a8a); // západní
-makeBox(WALL_T, WALL_H, ROOM, half, WALL_H / 2, 0, 0x9a8a8a);  // východní
-
-// Pár sloupů uprostřed jako překážky, ať se je do čeho zakoukat
-makeBox(1.5, WALL_H, 1.5, -4, WALL_H / 2, -3, 0xcc6644);
-makeBox(1.5, WALL_H, 1.5, 4, WALL_H / 2, -6, 0x44aa88);
-makeBox(1.5, WALL_H, 1.5, 0, WALL_H / 2, 2, 0xaa8844);
+// Projdeme mapu: postavíme stěny a zapamatujeme si start hráče + pozice nepřátel
+const enemySpawns = [];
+for (let row = 0; row < ROWS; row++) {
+  for (let col = 0; col < COLS; col++) {
+    const ch = MAP[row][col];
+    const x = cellToWorldX(col);
+    const z = cellToWorldZ(row);
+    if (ch === '#') {
+      makeWall(x, z);
+    } else if (ch === 'P') {
+      camera.position.set(x, 1.7, z); // sem postavíme hráče
+    } else if (ch === 'E') {
+      enemySpawns.push({ x, z });
+    }
+  }
+}
 
 // ------------------------------------------------------------
 // 4) OVLÁDÁNÍ: rozhlížení myší (pointer lock) + pohyb WASD
@@ -119,11 +186,14 @@ makeBox(1.5, WALL_H, 1.5, 0, WALL_H / 2, 2, 0xaa8844);
 const overlay = document.getElementById('overlay');
 
 // "yaw" = otáčení doleva/doprava, "pitch" = nahoru/dolů
-let yaw = 0;
+let yaw = Math.PI; // otočíme hráče čelem do mapy (ne do rohové stěny)
 let pitch = 0;
 
-// Kliknutí na překryv → zamkneme myš do hry (pointer lock)
+let gameOver = false; // true po výhře/prohře – zastaví hru
+
+// Kliknutí na překryv → buď restart (po konci), nebo start hry (zamčení myši)
 overlay.addEventListener('click', () => {
+  if (gameOver) { location.reload(); return; }
   renderer.domElement.requestPointerLock();
 });
 
@@ -132,6 +202,15 @@ document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === renderer.domElement;
   overlay.classList.toggle('hidden', locked);
 });
+
+// Konec hry – ukáže zprávu; kliknutím se hra restartuje (znovunačtením stránky)
+function endGame(message) {
+  if (gameOver) return;
+  gameOver = true;
+  document.exitPointerLock();
+  overlay.innerHTML = '<h1>' + message + '</h1><p>Klikni pro nový pokus</p>';
+  overlay.classList.remove('hidden');
+}
 
 // Pohyb myší → měníme úhel pohledu
 document.addEventListener('mousemove', (e) => {
@@ -220,15 +299,21 @@ function spawnEnemy(x, z) {
   return enemy;
 }
 
-// Rozmístíme pár nepřátel po místnosti
-spawnEnemy(-6, -7);
-spawnEnemy(6, -8);
-spawnEnemy(-2, -9);
-spawnEnemy(7, 4);
+// Rozmístíme nepřátele podle značek 'E' v mapě
+for (const s of enemySpawns) spawnEnemy(s.x, s.z);
 
-// Když nepřítel dostane zásah
+// --- Stav hráče a HUD (životy + počet zabitých) ---
 let kills = 0;
-const hudEl = document.getElementById('hud');
+let playerHealth = 100;
+const totalEnemies = enemies.length;
+const healthEl = document.getElementById('hud-health');
+const killsEl = document.getElementById('hud-kills');
+
+function updateHud() {
+  if (healthEl) healthEl.textContent = '❤️ Životy: ' + Math.max(0, Math.ceil(playerHealth));
+  if (killsEl) killsEl.textContent = '💀 Zabito: ' + kills + ' / ' + totalEnemies;
+}
+updateHud();
 
 function damageEnemy(enemy) {
   enemy.health -= 1;
@@ -239,7 +324,8 @@ function damageEnemy(enemy) {
     const i = enemies.indexOf(enemy);
     if (i !== -1) enemies.splice(i, 1);
     kills += 1;
-    if (hudEl) hudEl.textContent = 'Zabito: ' + kills;
+    updateHud();
+    if (enemies.length === 0) endGame('🏆 Vyhráls! Všichni nepřátelé zneškodněni.');
   } else {
     // Zásah, ale žije – krátce zčervená jako zpětná vazba
     enemy.sprite.material.color.setHex(0xff5555);
@@ -381,6 +467,19 @@ function animate() {
       const nz = camera.position.z + move.z;
       if (!collides(nx, camera.position.z)) camera.position.x = nx;
       if (!collides(camera.position.x, nz)) camera.position.z = nz;
+    }
+  }
+
+  // --- Nepřátelé ti ubližují, když jsi moc blízko ---
+  if (!gameOver && document.pointerLockElement === renderer.domElement) {
+    for (const e of enemies) {
+      const dx = camera.position.x - e.sprite.position.x;
+      const dz = camera.position.z - e.sprite.position.z;
+      if (dx * dx + dz * dz < 2.2 * 2.2) {
+        playerHealth -= 20 * dt; // ubývá životů za sekundu v blízkosti
+        updateHud();
+        if (playerHealth <= 0) { endGame('💀 Prohráls! Nepřátelé tě dostali.'); break; }
+      }
     }
   }
 
