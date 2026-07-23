@@ -1,7 +1,8 @@
 // ============================================================
 //  Moje střílečka – hlavní soubor hry
 //  Umí: mřížkovou mapu s texturami, chůzi (WASD) a rozhlížení myší,
-//  střílení, nepřátele se životy, HUD (životy + zabití), výhru/prohru.
+//  střílení, nepřátele se životy, kteří tě honí, zvuky (Web Audio),
+//  HUD (životy + zabití), výhru/prohru.
 //  Vše je bohatě okomentované, ať víš, co která část dělá.
 // ============================================================
 
@@ -194,6 +195,7 @@ let gameOver = false; // true po výhře/prohře – zastaví hru
 // Kliknutí na překryv → buď restart (po konci), nebo start hry (zamčení myši)
 overlay.addEventListener('click', () => {
   if (gameOver) { location.reload(); return; }
+  initAudio(); // zapneme zvuk (musí to být po kliknutí)
   renderer.domElement.requestPointerLock();
 });
 
@@ -302,6 +304,25 @@ function spawnEnemy(x, z) {
 // Rozmístíme nepřátele podle značek 'E' v mapě
 for (const s of enemySpawns) spawnEnemy(s.x, s.z);
 
+// Pohyb nepřátel: každý jde k hráči (pomaleji než ty, dá se utéct).
+// Používáme stejné kolize jako hráč, takže neprojdou zdí.
+const ENEMY_SPEED = 2.0; // metry za sekundu (hráč má 5)
+function moveEnemies(dt) {
+  for (const e of enemies) {
+    let dx = camera.position.x - e.sprite.position.x;
+    let dz = camera.position.z - e.sprite.position.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 1.2 || dist === 0) continue; // už je u tebe – netlačí se dovnitř
+    dx /= dist; dz /= dist;               // směr k hráči (délka 1)
+    const step = ENEMY_SPEED * dt;
+    const nx = e.sprite.position.x + dx * step;
+    const nz = e.sprite.position.z + dz * step;
+    // Pohyb po osách zvlášť, ať kloužou podél stěn (neuvíznou)
+    if (!collides(nx, e.sprite.position.z)) e.sprite.position.x = nx;
+    if (!collides(e.sprite.position.x, nz)) e.sprite.position.z = nz;
+  }
+}
+
 // --- Stav hráče a HUD (životy + počet zabitých) ---
 let kills = 0;
 let playerHealth = 100;
@@ -325,9 +346,11 @@ function damageEnemy(enemy) {
     if (i !== -1) enemies.splice(i, 1);
     kills += 1;
     updateHud();
+    playEnemyDeath();
     if (enemies.length === 0) endGame('🏆 Vyhráls! Všichni nepřátelé zneškodněni.');
   } else {
     // Zásah, ale žije – krátce zčervená jako zpětná vazba
+    playEnemyHit();
     enemy.sprite.material.color.setHex(0xff5555);
     setTimeout(() => enemy.sprite.material.color.setHex(0xffffff), 120);
   }
@@ -420,9 +443,10 @@ function shoot() {
     }
   }
 
-  // Efekty: výšleh + zpětný ráz
+  // Efekty: výšleh + zpětný ráz + zvuk
   muzzleFlash.visible = true;
   recoil = 0.08;
+  playShot();
 }
 
 // Levé tlačítko myši = výstřel (jen když hrajeme = myš je zamčená)
@@ -431,6 +455,61 @@ document.addEventListener('mousedown', (e) => {
   if (document.pointerLockElement !== renderer.domElement) return;
   shoot();
 });
+
+// ------------------------------------------------------------
+// 5c) ZVUKY (vytvořené v kódu přes Web Audio – nic se nestahuje)
+// ------------------------------------------------------------
+
+let audioCtx = null;
+
+// Zvuk smí naběhnout až po kliknutí uživatele (proto voláme při startu hry)
+function initAudio() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) audioCtx = new AC();
+  }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+// Krátký tón (pípnutí)
+function beep(freq, dur, type = 'square', vol = 0.15) {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(vol, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + dur); // rychle zeslábne
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.start(t); osc.stop(t + dur);
+}
+
+// Krátký šum (zní jako výstřel)
+function noiseBurst(dur = 0.08, vol = 0.18) {
+  if (!audioCtx) return;
+  const n = Math.floor(audioCtx.sampleRate * dur);
+  const buffer = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < n; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const src = audioCtx.createBufferSource(); src.buffer = buffer;
+  const gain = audioCtx.createGain(); gain.gain.value = vol;
+  src.connect(gain); gain.connect(audioCtx.destination);
+  src.start();
+}
+
+// Konkrétní herní zvuky
+function playShot()       { noiseBurst(0.08, 0.18); beep(180, 0.06, 'square', 0.08); }
+function playEnemyHit()   { beep(320, 0.07, 'square', 0.12); }
+function playEnemyDeath() { beep(420, 0.05, 'square', 0.14); beep(150, 0.18, 'sawtooth', 0.14); }
+
+let lastHurt = -1;
+function playHurt() {
+  if (!audioCtx) return;
+  if (audioCtx.currentTime - lastHurt < 0.4) return; // aby to nehrálo pořád dokola
+  lastHurt = audioCtx.currentTime;
+  beep(110, 0.16, 'sawtooth', 0.12);
+}
 
 // ------------------------------------------------------------
 // 6) HERNÍ SMYČKA: běží ~60x za sekundu a překresluje obraz
@@ -443,13 +522,19 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = clock.getDelta(); // čas od minulého snímku (v sekundách)
 
+  // Hrajeme? = myš je zamčená v okně a hra neskončila
+  const playing = document.pointerLockElement === renderer.domElement && !gameOver;
+
   // --- Rozhlížení: přepočítáme natočení kamery z yaw/pitch ---
   camera.rotation.order = 'YXZ';
   camera.rotation.y = yaw;
   camera.rotation.x = pitch;
 
-  // --- Pohyb WASD (jen když je myš zamčená = hrajeme) ---
-  if (document.pointerLockElement === renderer.domElement) {
+  // --- Nepřátelé se hýbou k tobě ---
+  if (playing) moveEnemies(dt);
+
+  // --- Pohyb WASD (jen když hrajeme) ---
+  if (playing) {
     // Směr "dopředu" a "doprava" podle toho, kam se díváme (jen vodorovně)
     const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
     const right   = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
@@ -470,14 +555,15 @@ function animate() {
     }
   }
 
-  // --- Nepřátelé ti ubližují, když jsi moc blízko ---
-  if (!gameOver && document.pointerLockElement === renderer.domElement) {
+  // --- Nepřátelé ti ubližují, když jsou moc blízko ---
+  if (playing) {
     for (const e of enemies) {
       const dx = camera.position.x - e.sprite.position.x;
       const dz = camera.position.z - e.sprite.position.z;
       if (dx * dx + dz * dz < 2.2 * 2.2) {
         playerHealth -= 20 * dt; // ubývá životů za sekundu v blízkosti
         updateHud();
+        playHurt();
         if (playerHealth <= 0) { endGame('💀 Prohráls! Nepřátelé tě dostali.'); break; }
       }
     }
