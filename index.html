@@ -2,13 +2,19 @@
 <html lang="cs">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Moje střílečka</title>
   <style>
     /* Základní styl: hra vyplní celé okno, žádné posuvníky */
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: system-ui, sans-serif; }
-    canvas { display: block; }
+    html, body {
+      width: 100%; height: 100%; overflow: hidden; background: #000;
+      font-family: system-ui, sans-serif;
+      touch-action: none;                 /* vypne posouvání/zoom prstem */
+      -webkit-user-select: none; user-select: none;
+      -webkit-touch-callout: none;
+    }
+    canvas { display: block; touch-action: none; }
 
     /* Zaměřovací křížek uprostřed obrazovky */
     #crosshair {
@@ -27,22 +33,7 @@
     #crosshair::before { left: 50%; top: 0; width: 2px; height: 100%; transform: translateX(-50%); }
     #crosshair::after  { top: 50%; left: 0; height: 2px; width: 100%; transform: translateY(-50%); }
 
-    /* Úvodní překryv – klikni pro spuštění (kvůli zamčení myši do hry) */
-    #overlay {
-      position: fixed; inset: 0;
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center;
-      gap: 12px;
-      background: rgba(0,0,0,0.75);
-      color: #fff; text-align: center;
-      z-index: 20; cursor: pointer;
-    }
-    #overlay h1 { font-size: 28px; }
-    #overlay p  { font-size: 16px; opacity: 0.85; }
-    #overlay .key { display: inline-block; padding: 2px 8px; border: 1px solid #888; border-radius: 4px; margin: 0 2px; }
-    #overlay.hidden { display: none; }
-
-    /* HUD – informace v rohu (počet zabitých nepřátel) */
+    /* HUD – informace v rohu (životy + počet zabitých) */
     #hud {
       position: fixed;
       top: 16px; left: 16px;
@@ -53,6 +44,74 @@
       text-shadow: 0 1px 3px rgba(0,0,0,0.9);
       pointer-events: none;
     }
+
+    /* Úvodní překryv */
+    #overlay {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 16px;
+      background: rgba(0,0,0,0.78);
+      color: #fff; text-align: center;
+      z-index: 20;
+      padding: 20px;
+    }
+    #overlay h1 { font-size: 30px; }
+    #overlay p  { font-size: 15px; opacity: 0.85; max-width: 520px; }
+    #overlay .key { display: inline-block; padding: 2px 8px; border: 1px solid #888; border-radius: 4px; margin: 0 2px; }
+    #overlay.hidden { display: none; }
+
+    /* Startovní tlačítka (volba ovládání) */
+    .start-buttons { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
+    .start-btn {
+      font: inherit; font-size: 18px; font-weight: bold;
+      color: #fff; background: #2a2a38;
+      border: 2px solid #55556a; border-radius: 12px;
+      padding: 18px 26px; cursor: pointer;
+      display: flex; flex-direction: column; align-items: center; gap: 6px;
+      min-width: 170px;
+    }
+    .start-btn .emoji { font-size: 32px; }
+    .start-btn .sub { font-size: 12px; font-weight: normal; opacity: 0.7; }
+    .start-btn:hover { background: #34344a; }
+    .start-btn.recommended { border-color: #ffd24a; box-shadow: 0 0 14px rgba(255,210,74,0.45); }
+
+    /* ===== Dotykové ovladače (viditelné jen v režimu dotyku) ===== */
+    #touch-controls { position: fixed; inset: 0; z-index: 15; pointer-events: none; display: none; }
+    body.touch-mode #touch-controls { display: block; }
+
+    #joystick {
+      position: fixed; left: 30px; bottom: 30px;
+      width: 130px; height: 130px; border-radius: 50%;
+      background: rgba(255,255,255,0.12);
+      border: 2px solid rgba(255,255,255,0.35);
+    }
+    #joystick-knob {
+      position: absolute; left: 50%; top: 50%;
+      width: 60px; height: 60px; margin-left: -30px; margin-top: -30px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.5);
+      transform: translate(0, 0);
+    }
+    #fire-btn {
+      position: fixed; right: 34px; bottom: 44px;
+      width: 96px; height: 96px; border-radius: 50%;
+      background: rgba(220,70,70,0.35);
+      border: 2px solid rgba(255,120,120,0.7);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 40px;
+    }
+
+    /* Výzva k otočení telefonu (jen dotyk + na výšku) */
+    #rotate-overlay {
+      position: fixed; inset: 0; z-index: 25;
+      background: rgba(0,0,0,0.92); color: #fff;
+      display: none;
+      flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+      text-align: center; padding: 24px;
+    }
+    #rotate-overlay .big { font-size: 54px; }
+    body.touch-mode.portrait #rotate-overlay { display: flex; }
   </style>
 
   <!-- Import map: říká prohlížeči, kde najít knihovnu Three.js (načte se z internetu) -->
@@ -71,14 +130,34 @@
     <div id="hud-kills">💀 Zabito: 0 / 0</div>
   </div>
 
+  <!-- Dotykové ovladače -->
+  <div id="touch-controls">
+    <div id="joystick"><div id="joystick-knob"></div></div>
+    <div id="fire-btn">🔫</div>
+  </div>
+
+  <!-- Výzva k otočení telefonu -->
+  <div id="rotate-overlay">
+    <div class="big">📱↻</div>
+    <div>Otoč telefon na šířku</div>
+  </div>
+
+  <!-- Úvodní obrazovka: volba ovládání -->
   <div id="overlay">
     <h1>🔫 Moje střílečka</h1>
-    <p>Klikni sem pro start</p>
-    <p>
-      Pohyb: <span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span>
-      &nbsp;•&nbsp; Rozhlížení: <span class="key">myš</span>
-      &nbsp;•&nbsp; Konec: <span class="key">Esc</span>
-    </p>
+    <div class="start-buttons">
+      <button id="btn-keyboard" class="start-btn">
+        <span class="emoji">⌨️</span>
+        <span>Klávesnice + myš</span>
+        <span class="sub">WASD, myš, levé tlačítko střílí</span>
+      </button>
+      <button id="btn-touch" class="start-btn">
+        <span class="emoji">📱</span>
+        <span>Dotyk (mobil)</span>
+        <span class="sub">joystick, tažení, tlačítko střelby</span>
+      </button>
+    </div>
+    <p>Vyber, jak chceš hrát. Cíl: zneškodni všechny nepřátele a přežij.</p>
   </div>
 
   <!-- Hlavní kód hry -->

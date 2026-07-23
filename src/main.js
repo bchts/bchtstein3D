@@ -181,7 +181,7 @@ for (let row = 0; row < ROWS; row++) {
 }
 
 // ------------------------------------------------------------
-// 4) OVLÁDÁNÍ: rozhlížení myší (pointer lock) + pohyb WASD
+// 4) OVLÁDÁNÍ: klávesnice+myš NEBO dotyk (mobil) – hráč si vybere na startu
 // ------------------------------------------------------------
 
 const overlay = document.getElementById('overlay');
@@ -190,44 +190,171 @@ const overlay = document.getElementById('overlay');
 let yaw = Math.PI; // otočíme hráče čelem do mapy (ne do rohové stěny)
 let pitch = 0;
 
-let gameOver = false; // true po výhře/prohře – zastaví hru
+let gameOver = false;      // true po výhře/prohře – zastaví hru
+let controlMode = null;    // 'keyboard' | 'touch' – zvolí se na startu
+let touchStarted = false;  // v dotykovém režimu: hra běží
 
-// Kliknutí na překryv → buď restart (po konci), nebo start hry (zamčení myši)
-overlay.addEventListener('click', () => {
-  if (gameOver) { location.reload(); return; }
-  initAudio(); // zapneme zvuk (musí to být po kliknutí)
-  renderer.domElement.requestPointerLock();
+// Telefon na výšku? (tam se hrát nedá – vyzveme k otočení)
+function isPortrait() { return window.innerHeight > window.innerWidth; }
+
+// Hrajeme právě teď? (rozhoduje podle zvoleného režimu)
+function isPlaying() {
+  if (gameOver) return false;
+  if (controlMode === 'touch') return touchStarted && !isPortrait();
+  if (controlMode === 'keyboard') return document.pointerLockElement === renderer.domElement;
+  return false;
+}
+
+// Omezení pohledu nahoru/dolů, ať se hráč nepřetočí
+function clampPitch() {
+  const limit = Math.PI / 2 - 0.05;
+  pitch = Math.max(-limit, Math.min(limit, pitch));
+}
+
+// --- Výběr ovládání na úvodní obrazovce ---
+const btnKeyboard = document.getElementById('btn-keyboard');
+const btnTouch = document.getElementById('btn-touch');
+
+// Podle zařízení předvybereme (zvýrazníme) doporučenou volbu
+const isTouchDevice = (navigator.maxTouchPoints || 0) > 0 || 'ontouchstart' in window;
+(isTouchDevice ? btnTouch : btnKeyboard).classList.add('recommended');
+
+btnKeyboard.addEventListener('click', () => {
+  controlMode = 'keyboard';
+  document.body.classList.remove('touch-mode');
+  initAudio();
+  renderer.domElement.requestPointerLock(); // překryv schová pointerlockchange
 });
 
-// Když se myš zamkne/odemkne, ukážeme/schováme překryv
+btnTouch.addEventListener('click', () => {
+  controlMode = 'touch';
+  document.body.classList.add('touch-mode');
+  initAudio();
+  touchStarted = true;
+  overlay.classList.add('hidden');
+  updatePortraitClass();
+});
+
+// Po konci hry: kliknutí kamkoli na překryv = restart (znovunačtení stránky)
+overlay.addEventListener('click', () => {
+  if (gameOver) location.reload();
+});
+
+// Když se myš zamkne/odemkne (jen klávesnicový režim), ukážeme/schováme překryv
 document.addEventListener('pointerlockchange', () => {
+  if (controlMode !== 'keyboard') return;
   const locked = document.pointerLockElement === renderer.domElement;
   overlay.classList.toggle('hidden', locked);
 });
 
-// Konec hry – ukáže zprávu; kliknutím se hra restartuje (znovunačtením stránky)
+// Konec hry – ukáže zprávu; kliknutím se hra restartuje
 function endGame(message) {
   if (gameOver) return;
   gameOver = true;
   document.exitPointerLock();
+  document.body.classList.remove('touch-mode'); // schovat dotykové ovladače
   overlay.innerHTML = '<h1>' + message + '</h1><p>Klikni pro nový pokus</p>';
   overlay.classList.remove('hidden');
 }
 
-// Pohyb myší → měníme úhel pohledu
-document.addEventListener('mousemove', (e) => {
-  if (document.pointerLockElement !== renderer.domElement) return;
-  yaw   -= e.movementX * 0.0025;
-  pitch -= e.movementY * 0.0025;
-  // Omezíme pohled nahoru/dolů, ať se hráč nepřetočí
-  const limit = Math.PI / 2 - 0.05;
-  pitch = Math.max(-limit, Math.min(limit, pitch));
-});
-
-// Stav kláves: které jsou právě zmáčknuté
+// --- Klávesnice + myš ---
 const keys = {};
 document.addEventListener('keydown', (e) => { keys[e.code] = true; });
 document.addEventListener('keyup',   (e) => { keys[e.code] = false; });
+
+document.addEventListener('mousemove', (e) => {
+  if (controlMode !== 'keyboard') return;
+  if (document.pointerLockElement !== renderer.domElement) return;
+  yaw   -= e.movementX * 0.0025;
+  pitch -= e.movementY * 0.0025;
+  clampPitch();
+});
+
+// --- Dotyk (mobil): levý joystick = chůze, tažení vpravo = rozhlížení, tlačítko = střelba ---
+const joystickEl = document.getElementById('joystick');
+const joystickKnob = document.getElementById('joystick-knob');
+const fireBtn = document.getElementById('fire-btn');
+
+const joyVec = { x: 0, z: 0 }; // výchylka joysticku (-1..1), z = dopředu
+let touchFiring = false;       // drží se tlačítko střelby?
+let fireCooldown = 0;          // prodleva mezi výstřely při držení
+
+const touchRoles = {};         // identifier prstu -> { role, lastX, lastY }
+const LOOK_SENS = 0.005;
+const JOY_R = 50;              // poloměr joysticku (px)
+
+function inRect(t, el, pad = 0) {
+  const r = el.getBoundingClientRect();
+  return t.clientX >= r.left - pad && t.clientX <= r.right + pad &&
+         t.clientY >= r.top - pad && t.clientY <= r.bottom + pad;
+}
+
+function updateJoystick(t) {
+  const r = joystickEl.getBoundingClientRect();
+  const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  let dx = t.clientX - cx, dy = t.clientY - cy;
+  const len = Math.hypot(dx, dy);
+  if (len > JOY_R) { dx = dx / len * JOY_R; dy = dy / len * JOY_R; }
+  joystickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
+  joyVec.x = dx / JOY_R;
+  joyVec.z = -dy / JOY_R; // prst nahoru = dopředu
+}
+
+function resetJoystick() {
+  joystickKnob.style.transform = 'translate(0, 0)';
+  joyVec.x = 0; joyVec.z = 0;
+}
+
+document.addEventListener('touchstart', (e) => {
+  if (controlMode !== 'touch') return;
+  for (const t of e.changedTouches) {
+    if (inRect(t, fireBtn, 10)) {
+      touchRoles[t.identifier] = { role: 'fire' };
+      touchFiring = true; fireCooldown = 0;
+    } else if (inRect(t, joystickEl, 40)) {
+      touchRoles[t.identifier] = { role: 'move' };
+      updateJoystick(t);
+    } else if (t.clientX > window.innerWidth / 2) {
+      touchRoles[t.identifier] = { role: 'look', lastX: t.clientX, lastY: t.clientY };
+    }
+  }
+  e.preventDefault();
+}, { passive: false });
+
+document.addEventListener('touchmove', (e) => {
+  if (controlMode !== 'touch') return;
+  for (const t of e.changedTouches) {
+    const info = touchRoles[t.identifier];
+    if (!info) continue;
+    if (info.role === 'move') {
+      updateJoystick(t);
+    } else if (info.role === 'look') {
+      yaw   -= (t.clientX - info.lastX) * LOOK_SENS;
+      pitch -= (t.clientY - info.lastY) * LOOK_SENS;
+      clampPitch();
+      info.lastX = t.clientX; info.lastY = t.clientY;
+    }
+  }
+  e.preventDefault();
+}, { passive: false });
+
+function onTouchEnd(e) {
+  for (const t of e.changedTouches) {
+    const info = touchRoles[t.identifier];
+    if (!info) continue;
+    if (info.role === 'move') resetJoystick();
+    else if (info.role === 'fire') touchFiring = false;
+    delete touchRoles[t.identifier];
+  }
+}
+document.addEventListener('touchend', onTouchEnd);
+document.addEventListener('touchcancel', onTouchEnd);
+
+// Přepínání třídy 'portrait' (kvůli výzvě k otočení telefonu)
+function updatePortraitClass() {
+  document.body.classList.toggle('portrait', isPortrait());
+}
+window.addEventListener('orientationchange', updatePortraitClass);
 
 // ------------------------------------------------------------
 // 5) KOLIZE: nepustíme hráče skrz stěny/sloupy
@@ -522,8 +649,8 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = clock.getDelta(); // čas od minulého snímku (v sekundách)
 
-  // Hrajeme? = myš je zamčená v okně a hra neskončila
-  const playing = document.pointerLockElement === renderer.domElement && !gameOver;
+  // Hrajeme právě teď? (podle zvoleného režimu – viz isPlaying)
+  const playing = isPlaying();
 
   // --- Rozhlížení: přepočítáme natočení kamery z yaw/pitch ---
   camera.rotation.order = 'YXZ';
@@ -533,20 +660,30 @@ function animate() {
   // --- Nepřátelé se hýbou k tobě ---
   if (playing) moveEnemies(dt);
 
-  // --- Pohyb WASD (jen když hrajeme) ---
+  // --- Pohyb (WASD nebo joystick – podle režimu) ---
   if (playing) {
     // Směr "dopředu" a "doprava" podle toho, kam se díváme (jen vodorovně)
     const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
     const right   = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
 
+    // Vstup převedeme na "kolik dopředu (mz)" a "kolik doprava (mx)"
+    let mx = 0, mz = 0;
+    if (controlMode === 'keyboard') {
+      if (keys['KeyW']) mz += 1;
+      if (keys['KeyS']) mz -= 1;
+      if (keys['KeyD']) mx += 1;
+      if (keys['KeyA']) mx -= 1;
+    } else {
+      mx = joyVec.x; mz = joyVec.z; // joystick (výchylka -1..1 → i pomalejší chůze)
+    }
+
     const move = new THREE.Vector3();
-    if (keys['KeyW']) move.add(forward);
-    if (keys['KeyS']) move.sub(forward);
-    if (keys['KeyD']) move.add(right);
-    if (keys['KeyA']) move.sub(right);
+    move.addScaledVector(forward, mz);
+    move.addScaledVector(right, mx);
 
     if (move.lengthSq() > 0) {
-      move.normalize().multiplyScalar(SPEED * dt);
+      if (move.lengthSq() > 1) move.normalize(); // diagonála/plný joystick = max rychlost
+      move.multiplyScalar(SPEED * dt);
       // Zkusíme pohyb po osách zvlášť, ať to hezky "klouže" podél stěn
       const nx = camera.position.x + move.x;
       const nz = camera.position.z + move.z;
@@ -567,6 +704,12 @@ function animate() {
         if (playerHealth <= 0) { endGame('💀 Prohráls! Nepřátelé tě dostali.'); break; }
       }
     }
+  }
+
+  // --- Auto-střelba při držení dotykového tlačítka ---
+  if (playing && controlMode === 'touch' && touchFiring) {
+    fireCooldown -= dt;
+    if (fireCooldown <= 0) { shoot(); fireCooldown = 0.25; } // ~4 rány/s
   }
 
   // --- Zpětný ráz zbraně: cukne dozadu (+z) a plynule se vrací ---
@@ -592,4 +735,5 @@ window.addEventListener('resize', () => {
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
+  updatePortraitClass(); // ukázat/schovat výzvu k otočení telefonu
 });
